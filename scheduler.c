@@ -4,17 +4,6 @@
 #include <time.h>
 #include <stdbool.h>
 
-//─────────────────────────────────────────────────────────────────────────────
-// 전체 시뮬레이션 상수 정의
-//  - MAX_PROCESS_NUM   : 최대 프로세스 개수
-//  - MAX_ARRIVAL       : 최대 도착 시간
-//  - MAX_CPU_BURST     : 최대 CPU 버스트 길이
-//  - MAX_IO_BURST      : 최대 I/O 버스트 길이
-//  - MAX_PRIORITY      : 우선순위 수준 개수 (1~MAX_PRIORITY)
-//  - MAX_TIME_QUANTUM  : Round-Robin 시 최대 타임 퀀텀
-//  - MAX_IO_EVENTS     : 프로세스당 최대 I/O 요청 횟수
-//  - MAX_GANTT_LENGTH  : Gantt 차트의 최대 표시 칸 수
-//─────────────────────────────────────────────────────────────────────────────
 #define MAX_PROCESS_NUM   3
 #define MAX_ARRIVAL      20
 #define MAX_CPU_BURST    20
@@ -27,10 +16,10 @@
 //─────────────────────────────────────────────────────────────────────────────
 // 스케줄러 알고리즘 개수 및 이름, 평가 지표 배열
 //  - SCHED_COUNT      : 스케줄러 종류 수
-//  - sched_names[...] : 각 인덱스가 어떤 알고리즘인지 표시
-//  - g_avg_wait[...]  : 각 알고리즘의 평균 대기 시간 (초기값 -1 = 미실행)
-//  - g_avg_turn[...]  : 각 알고리즘의 평균 반환 시간
-//─────────────────────────────────────────────────────────────────────────────
+//  - sched_names : 각 인덱스가 어떤 알고리즘인지 표시
+//  - g_avg_wait  : 각 알고리즘의 평균 대기 시간
+//  - g_avg_turn : 각 알고리즘의 평균 반환 시간
+
 #define SCHED_COUNT 6
 static const char *sched_names[SCHED_COUNT] = {
     "FCFS", "NP-SJF", "P-SJF", "NP-Priority", "P-Priority", "RR"
@@ -40,22 +29,8 @@ static float g_avg_wait[SCHED_COUNT] = { -1, -1, -1, -1, -1, -1 };
 static float g_avg_turn[SCHED_COUNT] = { -1, -1, -1, -1, -1, -1 };
 
 //-----------------------------------------------------------------------------
-// 프로세스(Process) 구조체 정의
-//
-// 각 프로세스가 갖는 정보:
-//  - pid            : 프로세스 식별자
-//  - CPU_burst      : 총 CPU 사용량
-//  - arrival        : 시스템 도착 시각
-//  - priority       : 우선순위 (1이 가장 높은 우선순위)
-//  - CPU_remaining  : 남은 CPU 사용 시간 (스케줄러 실행 중 감소)
-//  - io_count       : 총 I/O 요청 횟수
-//  - io_request_times[] : I/O 요청 시점 (남은 CPU가 이 값에 도달하면 I/O 발생)
-//  - current_io     : 다음 I/O 요청 인덱스
-//  - IO_burst       : I/O 작업 한 번당 소요 시간
-//  - IO_remaining   : 남은 I/O 처리 시간 (I/O 중일 때 감소)
-//  - waiting_time   : 실제 대기 시간 (평가용)
-//  - turnaround_time: 반환 시간 = 완료 시각 - 도착 시각 (평가용)
-//-----------------------------------------------------------------------------
+// 프로세스(Process) 
+
 typedef struct process {
     int pid;                                // 프로세스 번호
     int CPU_burst;                          // 할당된 전체 CPU 버스트
@@ -70,19 +45,13 @@ typedef struct process {
     int IO_burst;                           // I/O 한 번에 걸리는 시간
     int IO_remaining;                       // 남은 I/O 처리 시간
 
-    int waiting_time;                       // 대기 시간 (평가용)
-    int turnaround_time;                    // 반환 시간 (평가용)
+    int waiting_time;                       // 대기 시간
+    int turnaround_time;                    // 반환 시간
 } process;
 
 //------------------------------------------------------------------------------
-// 2) Circular Queue (원형 큐) 구조체 및 관련 상수
-//  - MAX_QUEUE_SIZE : 큐 용량 (프로세스 최대 수 + 1, full/empty 구분용)
-//  - queue 구조체:
-//      p[]    : 내부에 저장할 process 배열
-//      front  : 다음 dequeue 위치 인덱스
-//      rear   : 마지막 enqueue 위치 인덱스
-//      size   : 현재 저장된 요소 개수
-//------------------------------------------------------------------------------
+// Queue
+
 #define MAX_QUEUE_SIZE  (MAX_PROCESS_NUM + 1)
 typedef struct queue {
     process  p[MAX_QUEUE_SIZE];
@@ -91,10 +60,8 @@ typedef struct queue {
 
 
 //------------------------------------------------------------------------------
-// 3) Gantt Chart 기록용 구조체
-//  - chart[] : 각 타임슬롯별 실행된 PID ( 또는 -1 = idle )
-//  - count   : 기록된 슬롯 수
-//------------------------------------------------------------------------------
+// Gantt Chart 
+
 typedef struct gantt_chart {
     int chart[MAX_GANTT_LENGTH];
     int count;
@@ -102,23 +69,21 @@ typedef struct gantt_chart {
 
 
 //------------------------------------------------------------------------------
-// 4) 전역 완료 리스트 (evaluation 용)
-//  - done[]      : 완료된 프로세스 정보를 저장
-//  - done_count  : 완료된 프로세스 수
-//------------------------------------------------------------------------------
+// 전역 완료 리스트 (evaluation 용)
+
 process done[MAX_PROCESS_NUM];
 int     done_count = 0;
 
 
 //------------------------------------------------------------------------------
-// 5) 큐 연산 함수 프로토타입
+// 큐 연산 함수
 //  - create_queue()   : 빈 원형 큐 동적 생성 및 초기화
 //  - enqueue(q, pr)  : 프로세스 pr을 큐 q에 삽입
 //  - dequeue(q)      : 큐 q에서 front 요소 제거
 //  - queue_front(q)  : 큐 q의 front 요소 포인터 반환
 //  - queue_size(q)   : 큐 q에 저장된 요소 개수 반환
 //  - queue_is_empty(q): 큐 q가 비어있는지 여부 반환
-//------------------------------------------------------------------------------
+
 queue*   create_queue(void);
 void     enqueue(queue *q, process *pr);
 void     dequeue(queue *q);
@@ -128,38 +93,35 @@ int      queue_is_empty(queue *q);
 
 
 //------------------------------------------------------------------------------
-// 6) 초기화 및 프로세스 생성 함수 프로토타입
+// 초기화 및 프로세스 생성 함수 
 //  - config(&rq, &wq, &jq, &gc) : ready, waiting, job 큐 및 gantt_chart 초기화
 //  - create_process(jq)         : 랜덤 프로세스 생성 후 job 큐에 추가
-//------------------------------------------------------------------------------
+
 void config(queue **rq, queue **wq, queue **jq, gantt_chart **gc);
 void create_process(queue *jq);
 
 
 //------------------------------------------------------------------------------
-// 7) I/O 처리 함수 프로토타입
+// I/O 처리 함수 
 //  - io_execute(wq, rq) : waiting 큐 wq의 I/O 작업 처리 후 ready 큐 rq로 복귀
-//------------------------------------------------------------------------------
+
 void io_execute(queue *wq, queue *rq);
 
 
 //------------------------------------------------------------------------------
-// 8) Gantt 차트 기록/출력 함수 프로토타입
-//  - save_gantt(gc, pid)    : pid 실행 기록
-//  - save_gantt_idle(gc)    : idle 기록
-//  - print_gantt(gc)        : 누적된 Gantt 차트 출력
-//------------------------------------------------------------------------------
+// Gantt 차트 기록/출력 함수 
+
 void save_gantt(gantt_chart *gc, int pid);
 void save_gantt_idle(gantt_chart *gc);
 void print_gantt(gantt_chart *gc);
 
 
 //------------------------------------------------------------------------------
-// 9) 정렬 및 선택 유틸 함수 프로토타입
+// 정렬 및 선택 유틸 함수
 //  - sort_by_arrival(q)   : job 큐 q를 arrival 시간 기준 오름차순 정렬
 //  - select_shortest(q)   : ready 큐 q에서 CPU_remaining 가장 짧은 프로세스 front로 이동
 //  - select_highest(q)    : ready 큐 q에서 우선순위(숫자 작을수록) 가장 높은 프로세스 front로 이동
-//------------------------------------------------------------------------------
+
 void sort_by_arrival(queue *q);
 void select_shortest(queue *q);
 void select_highest(queue *q);
@@ -169,9 +131,9 @@ void select_highest(queue *q);
 //  - pick_fcfs(queue *rq): FCFS 방식용, 별도 선택 로직 없이 큐 front 사용
 //  - pick_sjf(queue *rq): SJF 방식용, select_shortest로 CPU_remaining이 가장 짧은 프로세스를 front로 이동
 //  - pick_prio(queue *rq): Priority 방식용, select_highest로 우선순위(값 작을수록 높음)가 가장 높은 프로세스를 front로 이동
-//------------------------------------------------------------------------------
+
 void pick_fcfs(queue *rq) {
-    // FCFS: ready 큐에서 아무 처리 없이 front가 다음 실행 대상
+    // FCFS: 아무 처리 없이 front가 다음 실행 대상
 }
 
 void pick_sjf(queue *rq) {
@@ -186,15 +148,6 @@ void pick_prio(queue *rq) {
 
 
 //------------------------------------------------------------------------------
-// 공통 스케줄러 루프: run_scheduler()
-//  - jq          : 도착 대기(job) 큐
-//  - rq          : 실행 대기(ready) 큐
-//  - wq          : I/O 대기(waiting) 큐
-//  - gc          : Gantt 차트 기록용 구조체
-//  - pick_ready  : ready 큐에서 다음 실행 대상 선택 콜백
-//  - preemptive  : 선점 여부 (true: 선점형, false: 비선점형)
-//  - sched_idx   : 통계 저장용 알고리즘 인덱스
-//
 // 실행 순서:
 //  1) job 큐를 arrival 순으로 정렬, I/O 인덱스 초기화
 //  2) 루프: job, ready, waiting, 실행 중 프로세스 존재 시 계속
@@ -209,7 +162,7 @@ void pick_prio(queue *rq) {
 //          - I/O 요청 시점일 경우 I/O 처리 시작(이후 waiting 큐로 이동)
 //          - 아니면 CPU_remaining--, I/O/arrival 재처리, 완료 시 통계 저장
 //  3) 종료 후 평균 대기/턴어라운드 시간 계산 및 전역 배열에 저장
-//------------------------------------------------------------------------------
+
 void run_scheduler(queue *jq, queue *rq, queue *wq,
                    gantt_chart *gc,
                    void (*pick_ready)(queue*),
@@ -300,7 +253,7 @@ void run_scheduler(queue *jq, queue *rq, queue *wq,
 }
 
 //-----------------------------------------------------------------------------
-// 10) 평가 함수 프로토타입 및 RR 스케줄러 선언
+// Evaluation 및 RR 스케줄러 선언
 //
 // 함수 평가(evaluation):
 //   - 모든 프로세스가 완료된 후 각 스케줄러별로 계산된 평균 대기 시간(g_avg_wait)
@@ -314,7 +267,7 @@ void scheduler_RR(queue *rq, queue *wq, queue *jq, gantt_chart *gc);
   
 
 //-----------------------------------------------------------------------------
-// 11) main 함수
+// main 함수
 //
 // 프로그램 시작점:
 //   1. 난수 초기화(srand).
@@ -329,10 +282,6 @@ void scheduler_RR(queue *rq, queue *wq, queue *jq, gantt_chart *gc);
 //        • 스케줄러 실행 → Gantt 출력 → 평가 출력.
 //   5. choice=0 입력 시 종료, 할당된 메모리 해제 후 return.
 //
-// 핵심 포인트:
-//   - memcpy로 orig_jq 복사 → 매 스케줄러 간 독립적인 시뮬레이션.
-//   - front/rear/size 직접 초기화로 큐를 "비우기".
-//   - 일관된 화면 출력 흐름: Gantt → Evaluation.
 
 int main(void) {
     srand((unsigned)time(NULL));
@@ -408,18 +357,7 @@ int main(void) {
 
 
 //-----------------------------------------------------------------------------
-// 12) 큐 연산 구현
-//
-// create_queue:
-//   - 빈 원형 큐 구조체를 동적 할당하고 front=0, rear=-1, size=0 으로 초기화.
-// enqueue:
-//   - 큐가 가득 차지 않았다면 rear를 한 칸 옮긴 뒤 요소 추가, size++.
-// dequeue:
-//   - 큐가 비어있지 않다면 front를 한 칸 옮기고 size--.
-// queue_front:
-//   - front 위치의 프로세스 포인터 반환 (큐가 비어 있으면 NULL).
-// queue_size, queue_is_empty:
-//   - 현재 size 값 반환 또는 size==0 여부 반환.
+// 큐 연산
 
 queue* create_queue(void) {
     queue *q = malloc(sizeof(queue));
@@ -431,8 +369,8 @@ queue* create_queue(void) {
 }
 
 void enqueue(queue *q, process *pr) {
-    if (q->size >= MAX_PROCESS_NUM) return;         // 가득 찼으면 무시
-    if (q->rear == MAX_QUEUE_SIZE-1) q->rear = -1;  // 배열 끝 → wrap-around
+    if (q->size >= MAX_PROCESS_NUM) return;
+    if (q->rear == MAX_QUEUE_SIZE-1) q->rear = -1;
     q->p[++q->rear] = *pr;
     q->size++;
 }
@@ -461,8 +399,6 @@ int queue_is_empty(queue *q) {
 // config:
 //   - ready(rq), waiting(wq), job(jq) 큐와 Gantt 차트(gc)를 동적 할당하고
 //     각 구조체를 기본 상태로 초기화합니다.
-//   • rq, wq, jq: create_queue()로 크기, front, rear를 초기화
-//   • gc: malloc으로 할당한 후 count를 0으로, chart 배열을 0으로 채워 처음 상태 설정
 //
 // create_process:
 //   - 1~MAX_PROCESS_NUM 개의 프로세스를 랜덤 생성하여 job 큐(jq)에 넣습니다.
@@ -473,7 +409,7 @@ int queue_is_empty(queue *q) {
 //   • current_io ← 0, IO_burst(랜덤), IO_remaining ← 0
 //   • waiting_time, turnaround_time 초기화
 //   • 정보를 화면에 출력하고 enqueue(jq, &tmp)로 작업 큐에 추가
-//-----------------------------------------------------------------------------
+
 void config(queue **rq, queue **wq, queue **jq, gantt_chart **gc){
     *rq = create_queue();
     *wq = create_queue();
@@ -538,8 +474,8 @@ void create_process(queue *jq){
 //   - waiting 큐(wq)에 있는 프로세스 중 I/O_remaining--
 //   • I/O_remaining > 0 → wq에 다시 enqueue(여전히 I/O 중)
 //   • I/O_remaining == 0 → rq(ready 큐)로 이동하여 CPU 대기 상태로 복귀
-//   - 매 tick마다 호출되어 I/O 큐를 순회하며 I/O 완료된 프로세스를 ready 큐로 재투입
-//-----------------------------------------------------------------------------
+//   - 매 tick마다 호출되어 I/O 큐를 순회하며 I/O 완료된 프로세스를 ready 큐로
+
 void io_execute(queue *wq, queue *rq){
     int cnt = wq->size;
     while (cnt--) {
@@ -556,17 +492,7 @@ void io_execute(queue *wq, queue *rq){
 
 //-----------------------------------------------------------------------------
 // Gantt 차트 저장 및 출력 함수
-//
-// save_gantt:
-//   - CPU에 프로세스가 실행된 한 타임 슬롯의 pid를 차트에 기록
-// save_gantt_idle:
-//   - CPU 유휴 상태(Idle)를 -1로 표시하여 차트에 기록
-// print_gantt:
-//   1) 차트의 연속된 동일 pid 구간을 묶어 “[P#]” 또는 “Idle” 막대로 출력
-//   2) 각각의 막대가 끝나는 시점을 시간 축으로 정밀하게 표시
-//   - gc->chart: 타임슬롯별 pid 배열
-//   - gc->count: 기록된 총 타임슬롯 수
-//-----------------------------------------------------------------------------
+
 void save_gantt(gantt_chart *gc, int pid) {
     gc->chart[gc->count++] = pid;
 }
@@ -611,22 +537,19 @@ void print_gantt(gantt_chart *gc) {
 
 
 //-----------------------------------------------------------------------------
-// 9) 정렬 및 선택 유틸리티 함수
+// 정렬 및 선택 유틸리티 함수
 //
 // sort_by_arrival:
-//   - arrival 필드를 기준으로 ready/job 큐를 안정적으로 버블 정렬
-//   - O(n²) 알고리즘으로 소규모 프로세스 수에 적합
+//   - ready/job 큐를  버블 정렬
 //
 // select_shortest:
 //   - CPU_remaining(남은 실행 시간)이 가장 작은 프로세스를 큐의 front로 교환
-//   - Preemptive(PSJF) 및 Non-Preemptive SJF에서 ready 큐에서 호출
+//   - Preemptive(PSJF) & Non-Preemptive SJF에서 ready 큐에서 호출
 //
 // select_highest:
 //   - priority(숫자 작을수록 높음)가 가장 높은 프로세스를 큐의 front로 교환
-//   - Preemptive 및 Non-Preemptive Priority에서 ready 큐에서 호출
-//
-// 각 함수는 queue *q의 내부 배열을 직접 교체하여 front 인덱스의 프로세스를 변경
-//-----------------------------------------------------------------------------
+//   - Preemptive & Non-Preemptive Priority에서 ready 큐에서 호출
+
 void sort_by_arrival(queue *q) {
     for (int i = 0; i < q->size - 1; i++) {
         for (int j = 0; j < q->size - 1 - i; j++) {
@@ -672,11 +595,8 @@ void select_highest(queue *q) {
 }
 
 //-----------------------------------------------------------------------------
-// 10) Evaluation: 스케줄링 알고리즘별 결과 요약 출력
-//
-// - 각 알고리즘 이름, 평균 대기 시간, 평균 반환 시간을 표 형태로 출력합니다.
-// - g_avg_wait[i], g_avg_turn[i]에 -1.0f가 들어있으면 해당 알고리즘이 아직 실행되지 않은 상태이므로 "Null"로 표시합니다.
-// - SCHED_COUNT는 알고리즘 수, sched_names[]는 알고리즘 이름 배열입니다.
+// Evaluation
+
 void evaluation() {
     printf("\n===== Scheduler Comparison =====\n");
     printf("%-12s | %-12s | %-12s\n", "Algorithm", "Avg Waiting", "Avg Turnaround");
@@ -697,21 +617,10 @@ void evaluation() {
 
 
 //-----------------------------------------------------------------------------
-// 11) Round Robin (RR): 시분할(Time Quantum) 스케줄링 알고리즘
+// Round Robin
 //
 // - 준비 큐(rq)에서 맨 앞 프로세스를 1틱씩 실행하되, 최대 MAX_TIME_QUANTUM 틱까지만 실행.
-// - I/O 요청 시점(이전 틱에 io_request_times[current_io] 도달) 전 1틱 실행 후 waiting 큐(wq)로 이동.
-// - waiting 큐는 매 틱마다 io_execute()로 I/O 버스트를 감소시키고, 완료된 프로세스를 다시 ready 큐로 이동.
-// - CPU가 idle 상태일 때는 Gantt 차트에 Idle 기록 후 clock 증가.
-// - 프로세스가 종료되면 turnaround_time과 waiting_time을 계산해 done[]에 저장.
-// - 모든 프로세스가 완료되면 평균 대기/반환 시간을 계산해 전역 배열에 저장.
-//
-// 파라미터:
-//   rq - 준비 큐 (ready queue)
-//   wq - 대기 큐 (waiting queue) for I/O
-//   jq - 잡 큐 (job queue) for 아직 도착하지 않은 프로세스
-//   gc - Gantt 차트 저장용 구조체
-//-----------------------------------------------------------------------------
+
 void scheduler_RR(queue *rq, queue *wq, queue *jq, gantt_chart *gc) {
     int clock = 0;
     process *exe = NULL;
@@ -723,7 +632,7 @@ void scheduler_RR(queue *rq, queue *wq, queue *jq, gantt_chart *gc) {
         jq->p[(jq->front + i) % MAX_QUEUE_SIZE].current_io = 0;
     }
 
-    // 3) 메인 루프: job, ready, waiting, or 실행 중인 프로세스가 남아 있는 동안 반복
+    // 3) 메인 스케줄러 루프프
     while (jq->size || rq->size || wq->size || exe) {
         // 3-1) 시점 clock에 새로 도착한 프로세스 → ready 큐로 이동
         while (jq->size && jq->p[jq->front].arrival <= clock) {
@@ -789,8 +698,6 @@ void scheduler_RR(queue *rq, queue *wq, queue *jq, gantt_chart *gc) {
             }
         }
     }
-
-    // 4) RR 실행 후 평균 대기/반환 시간 계산
     {
         double sum_w = 0.0, sum_t = 0.0;
         for (int i = 0; i < done_count; i++) {
